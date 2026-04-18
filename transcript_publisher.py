@@ -6,7 +6,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-RAILS_API_URL = os.getenv("RAILS_API_URL", "http://localhost:3000/api/v1")
+RAILS_API_URL = os.getenv("RAILS_API_URL", "http://localhost:8000/api/v1")
 
 
 class TranscriptPublisher:
