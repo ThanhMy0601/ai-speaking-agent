@@ -80,6 +80,7 @@ async def entrypoint(ctx: JobContext):
 
     session_type = room_metadata.get("session_type", "free_practice")
     lesson_id = room_metadata.get("lesson_id")
+    topic_id = room_metadata.get("topic_id")
     scenario = room_metadata.get("scenario", "job_interview")
     session_id = room_metadata.get("session_id")
 
@@ -90,6 +91,7 @@ async def entrypoint(ctx: JobContext):
     system_prompt = build_system_prompt(
         session_type=session_type,
         lesson_id=lesson_id,
+        topic_id=topic_id,
         scenario=scenario,
         rag=rag,
     )
@@ -107,6 +109,7 @@ async def entrypoint(ctx: JobContext):
     )
     agent._session_type = session_type
     agent._scenario = scenario
+    agent._topic_id = topic_id
 
     # Create and start the session with the voice pipeline
     session = AgentSession(
@@ -137,6 +140,7 @@ async def entrypoint(ctx: JobContext):
 def build_system_prompt(
     session_type: str,
     lesson_id: int | None,
+    topic_id: int | None,
     scenario: str,
     rag: RAGContextProvider,
 ) -> str:
@@ -168,7 +172,16 @@ def build_system_prompt(
             + rag.get_roleplay_context(scenario)
         )
 
-    # Free practice
+    # Topic-based free practice
+    if topic_id:
+        topic_context = rag.get_topic_context(topic_id)
+        return (
+            base_prompt
+            + "Guide the conversation around the following topic. Keep it engaging and educational:\n\n"
+            + topic_context
+        )
+
+    # Lesson-based free practice (legacy)
     lesson_context = rag.get_lesson_context(lesson_id)
     return (
         base_prompt
