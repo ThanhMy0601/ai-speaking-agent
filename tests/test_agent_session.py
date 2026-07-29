@@ -104,6 +104,31 @@ def test_interruption_ignores_a_single_filler_word():
 
     assert opts["interruption"]["min_words"] >= 2
     assert opts["interruption"]["resume_false_interruption"] is True
-    # mode is deliberately unset so the SDK picks its adaptive ML classifier;
-    # pinning "vad" let a cough interrupt the tutor.
-    assert "mode" not in opts["interruption"]
+
+
+def test_interruption_mode_is_pinned_to_vad_by_default():
+    """Regression guard.
+
+    This test previously asserted the opposite — that `mode` was left unset
+    so the SDK could "pick its adaptive ML classifier". Adaptive is not a
+    local model: it is a LiveKit Cloud inference service at
+    agent-gateway.livekit.cloud. Against a self-hosted server it
+    authenticates with the local devkey, gets a 401, and kills the job with
+    "failed to detect interruption after 3 attempts" — the agent joins the
+    room, publishes a track, and immediately leaves.
+
+    Leaving mode unset let the SDK auto-select it whenever a streaming STT
+    and a VAD were present, which is always here. So it stays pinned.
+    """
+    opts = build_turn_handling(build_context())
+
+    assert opts["interruption"]["mode"] == "vad"
+
+
+def test_adaptive_interruption_is_opt_in_for_livekit_cloud(monkeypatch):
+    import agent as agent_module
+
+    monkeypatch.setattr(agent_module, "ADAPTIVE_INTERRUPTION", True)
+    opts = agent_module.build_turn_handling(build_context())
+
+    assert opts["interruption"]["mode"] == "adaptive"

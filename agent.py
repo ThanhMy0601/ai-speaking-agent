@@ -8,6 +8,7 @@ ContextClient; nothing about what to teach lives in this repo.
 
 import json
 import logging
+import os
 import time
 
 from dotenv import load_dotenv
@@ -33,6 +34,12 @@ from transcript_publisher import TranscriptPublisher
 
 logger = logging.getLogger("voice-agent")
 logger.setLevel(logging.INFO)
+
+# Adaptive interruption is a LiveKit Cloud service, not a local model, and it
+# bills per use. Off by default so a self-hosted server works out of the box;
+# set ADAPTIVE_INTERRUPTION=true only when running against LiveKit Cloud with
+# credentials that are valid there.
+ADAPTIVE_INTERRUPTION = os.getenv("ADAPTIVE_INTERRUPTION", "").lower() in ("1", "true", "yes")
 
 
 class EnglishTutorAgent(Agent):
@@ -206,8 +213,18 @@ def build_turn_handling(context: AgentContext) -> TurnHandlingOptions:
     The SDK default is fixed endpointing at 0.5s of silence, which is tuned
     for native speakers and chronically cuts off learners who pause
     mid-sentence to find a word.
+
+    On interruption mode: "adaptive" is NOT a local ML classifier, it is a
+    LiveKit Cloud inference service (agent-gateway.livekit.cloud). Leaving
+    `mode` unset lets the SDK auto-select it whenever a streaming STT and a
+    VAD are present, which against a self-hosted server authenticates with
+    the local devkey, gets a 401, and kills the job with
+    "failed to detect interruption after 3 attempts" — the agent joins the
+    room, publishes a track, and leaves. So the mode is pinned explicitly,
+    and only opts into the cloud service when told to.
     """
     tuning = context.turn_tuning
+    mode = "adaptive" if ADAPTIVE_INTERRUPTION else "vad"
 
     return TurnHandlingOptions(
         endpointing={
@@ -220,9 +237,11 @@ def build_turn_handling(context: AgentContext) -> TurnHandlingOptions:
         },
         interruption={
             "enabled": True,
-            # mode omitted on purpose so the SDK picks its adaptive ML
-            # classifier. Pinning "vad" meant a cough or an "umm" cut the
-            # tutor off mid-sentence.
+            "mode": mode,
+            # These three are what keep plain VAD usable for learners: a
+            # cough or a lone "umm" is too short and too few words to count,
+            # and if the learner starts then stalls, the tutor resumes its
+            # sentence instead of abandoning it.
             "min_duration": 0.6,
             "min_words": 2,
             "resume_false_interruption": True,

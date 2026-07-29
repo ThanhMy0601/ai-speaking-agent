@@ -13,12 +13,17 @@ repos, and the agent no longer needs database credentials.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
 
+logger = logging.getLogger(__name__)
+
+# The bare origin, NOT the /api/v1 base — /internal endpoints sit outside the
+# public API namespace, and this client appends the full path itself.
 RAILS_API_URL = os.getenv("RAILS_API_URL", "http://localhost:8000")
 AGENT_SERVICE_TOKEN = os.getenv("AGENT_SERVICE_TOKEN", "dev_agent_service_token")
 
@@ -116,6 +121,11 @@ class ContextClient:
         Returns an empty AgentContext rather than raising if Rails is
         unreachable: a degraded generic conversation beats dropping the
         learner into a room where nobody ever speaks.
+
+        It logs loudly when it does, though. Silently degrading is how a
+        stale RAILS_API_URL pointed at the frontend's port for two phases
+        without anyone noticing — every session just quietly lost its topic,
+        its opening line and its level.
         """
         if not session_id:
             return AgentContext()
@@ -124,7 +134,14 @@ class ContextClient:
             response = await self._client.get(f"/internal/agent_contexts/{session_id}")
             response.raise_for_status()
             return AgentContext.from_payload(response.json())
-        except (httpx.HTTPError, ValueError):
+        except (httpx.HTTPError, ValueError) as e:
+            logger.error(
+                "could not load session context from %s — falling back to a generic "
+                "conversation with no topic, level or learner profile: %s: %s",
+                self._client.base_url,
+                type(e).__name__,
+                e,
+            )
             return AgentContext()
 
     async def aclose(self) -> None:

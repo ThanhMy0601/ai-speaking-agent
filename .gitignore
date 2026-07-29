@@ -24,3 +24,6 @@ build/
 
 # Test caches
 .pytest_cache/
+
+# Config template (safe to commit — no real secrets)
+!.env.example
