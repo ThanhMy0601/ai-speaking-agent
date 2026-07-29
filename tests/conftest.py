@@ -54,21 +54,12 @@ def fake_llm():
 class FakeRag:
     """Duck-typed stand-in for RAGContextProvider — no DB connection.
 
-    build_system_prompt() only calls these four methods, so tests don't
-    need a real Postgres connection to exercise prompt-building logic.
+    build_system_prompt() only calls get_topic_context, so tests don't need
+    a real Postgres connection to exercise prompt-building logic.
     """
-
-    def get_ielts_context(self, part: int) -> str:
-        return f"[fake ielts context part {part}]"
-
-    def get_roleplay_context(self, scenario: str) -> str:
-        return f"[fake roleplay context for {scenario}]"
 
     def get_topic_context(self, topic_id) -> str:
         return f"[fake topic context for topic {topic_id}]"
-
-    def get_lesson_context(self, lesson_id) -> str:
-        return f"[fake lesson context for lesson {lesson_id}]"
 
 
 @pytest.fixture

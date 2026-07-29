@@ -11,9 +11,8 @@ from livekit.agents.voice.agent_session import AgentSession
 from agent import EnglishTutorAgent
 
 
-async def test_free_practice_greeting_is_spoken_on_enter(fake_llm):
+async def test_greeting_is_spoken_on_enter(fake_llm):
     agent = EnglishTutorAgent(system_prompt="You are a helpful tutor.", publisher=None)
-    agent._session_type = "free_practice"
 
     session = AgentSession(llm=fake_llm)
     await session.start(agent=agent)
@@ -40,7 +39,6 @@ async def test_current_greeting_ignores_topic_id(fake_llm):
     and should be updated deliberately, not treated as a regression.
     """
     agent = EnglishTutorAgent(system_prompt="You are a helpful tutor.", publisher=None)
-    agent._session_type = "free_practice"
     agent._topic_id = 3  # learner already chose "Travel & Tourism"
 
     session = AgentSession(llm=fake_llm)
@@ -60,7 +58,6 @@ async def test_llm_reply_after_greeting_is_captured_in_run_result(fake_llm):
     during that run (the assistant's reply) — the user's own input isn't
     re-emitted as an event, it's the run's input."""
     agent = EnglishTutorAgent(system_prompt="You are a helpful tutor.", publisher=None)
-    agent._session_type = "free_practice"
 
     session = AgentSession(llm=fake_llm)
     await session.start(agent=agent)

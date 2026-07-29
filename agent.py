@@ -50,16 +50,12 @@ class EnglishTutorAgent(Agent):
 
     async def on_enter(self):
         """Called when the agent enters the session."""
-        session_type = getattr(self, "_session_type", "free_practice")
-        scenario = getattr(self, "_scenario", "job_interview")
-
-        greetings = {
-            "free_practice": "Hello! I'm your English practice partner. What would you like to talk about today?",
-            "ielts_mock_test": "Welcome to your IELTS Speaking mock test. I'll be your examiner today. Let's begin with Part 1. Could you tell me your full name, please?",
-            "role_play": f"Let's begin our role-play scenario. {get_roleplay_greeting(scenario)}",
-        }
-        greeting = greetings.get(session_type, greetings["free_practice"])
-        self.session.say(greeting)
+        # Phase 3 replaces this with a per-topic opening line read from the
+        # database, so the tutor opens *in* the topic the learner already
+        # picked instead of asking them to pick one again.
+        self.session.say(
+            "Hello! I'm your English practice partner. What would you like to talk about today?"
+        )
 
 
 def prewarm(proc: JobProcess):
@@ -78,23 +74,13 @@ async def entrypoint(ctx: JobContext):
         except json.JSONDecodeError:
             pass
 
-    session_type = room_metadata.get("session_type", "free_practice")
-    lesson_id = room_metadata.get("lesson_id")
     topic_id = room_metadata.get("topic_id")
-    scenario = room_metadata.get("scenario", "job_interview")
     session_id = room_metadata.get("session_id")
 
-    # Initialize RAG context
+    # Initialize topic context
     rag = RAGContextProvider()
 
-    # Build system prompt based on session type
-    system_prompt = build_system_prompt(
-        session_type=session_type,
-        lesson_id=lesson_id,
-        topic_id=topic_id,
-        scenario=scenario,
-        rag=rag,
-    )
+    system_prompt = build_system_prompt(topic_id=topic_id, rag=rag)
 
     # Initialize transcript publisher
     publisher = TranscriptPublisher(session_id) if session_id else None
@@ -107,8 +93,6 @@ async def entrypoint(ctx: JobContext):
         system_prompt=system_prompt,
         publisher=publisher,
     )
-    agent._session_type = session_type
-    agent._scenario = scenario
     agent._topic_id = topic_id
 
     # Create and start the session with the voice pipeline
@@ -138,13 +122,10 @@ async def entrypoint(ctx: JobContext):
 
 
 def build_system_prompt(
-    session_type: str,
-    lesson_id: int | None,
     topic_id: int | None,
-    scenario: str,
     rag: RAGContextProvider,
 ) -> str:
-    """Build the LLM system prompt based on session type and RAG context."""
+    """Build the LLM system prompt from the selected topic's context."""
 
     base_prompt = (
         "You are an AI English speaking tutor. Your role is to help learners "
@@ -154,52 +135,11 @@ def build_system_prompt(
         "Keep responses concise (2-3 sentences) to maintain conversation flow.\n\n"
     )
 
-    if session_type == "ielts_mock_test":
-        return (
-            "You are an IELTS Speaking examiner. Follow the official IELTS Speaking test format strictly.\n"
-            "Maintain a professional, neutral tone. Do not help the candidate with answers.\n"
-            "Ask follow-up questions to probe deeper. Assess fluency, coherence, lexical resource, "
-            "grammatical range, and pronunciation.\n\n"
-            + rag.get_ielts_context(1)
-        )
-
-    if session_type == "role_play":
-        return (
-            base_prompt
-            + "You are playing a specific professional role in a business scenario.\n"
-            "Stay in character throughout the conversation.\n"
-            "Use professional vocabulary appropriate to the scenario.\n\n"
-            + rag.get_roleplay_context(scenario)
-        )
-
-    # Topic-based free practice
-    if topic_id:
-        topic_context = rag.get_topic_context(topic_id)
-        return (
-            base_prompt
-            + "Guide the conversation around the following topic. Keep it engaging and educational:\n\n"
-            + topic_context
-        )
-
-    # Lesson-based free practice (legacy)
-    lesson_context = rag.get_lesson_context(lesson_id)
     return (
         base_prompt
-        + "Incorporate the following lesson context into the conversation naturally:\n\n"
-        + lesson_context
+        + "Guide the conversation around the following topic. Keep it engaging and educational:\n\n"
+        + rag.get_topic_context(topic_id)
     )
-
-
-def get_roleplay_greeting(scenario: str) -> str:
-    """Get the opening line for a role-play scenario."""
-    greetings = {
-        "salary_negotiation": "Thank you for coming in. I understand you'd like to discuss the compensation package we offered. What are your thoughts?",
-        "client_presentation": "Thank you for scheduling this demo. We're evaluating several solutions. Please go ahead with your presentation.",
-        "job_interview": "Welcome, please have a seat. Thank you for coming in today. Let's start — can you tell me a bit about yourself?",
-        "team_meeting_facilitation": "Hi everyone, thanks for joining. I believe you're leading today's meeting?",
-        "conflict_resolution": "I wanted to talk about the project direction. I have some concerns about the current approach.",
-    }
-    return greetings.get(scenario, greetings["job_interview"])
 
 
 if __name__ == "__main__":
