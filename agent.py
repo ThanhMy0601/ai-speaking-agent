@@ -1,13 +1,14 @@
 """
 AI English Speaking App — LiveKit Voice Agent (v1.5 API)
 
-Joins LiveKit rooms as an AI participant and orchestrates
-the STT → LLM (RAG) → TTS voice pipeline.
+Joins LiveKit rooms as an AI participant and orchestrates the
+STT → LLM → TTS voice pipeline. All teaching content comes from Rails via
+ContextClient; nothing about what to teach lives in this repo.
 """
 
-import os
 import json
 import logging
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -16,18 +17,17 @@ from livekit.agents import (
     Agent,
     AgentSession,
     AutoSubscribe,
-    InterruptionOptions,
     JobContext,
     JobProcess,
     TurnHandlingOptions,
     WorkerOptions,
     cli,
-    llm,
 )
 from livekit.plugins import deepgram, elevenlabs, silero
 from livekit.plugins import google as google_plugins
 
-from rag_context import RAGContextProvider
+from context_client import AgentContext, ContextClient
+from prompts import build_instructions
 from transcript_publisher import TranscriptPublisher
 
 logger = logging.getLogger("voice-agent")
@@ -40,22 +40,39 @@ class EnglishTutorAgent(Agent):
     def __init__(
         self,
         *,
-        system_prompt: str,
+        context: AgentContext | None = None,
         publisher: TranscriptPublisher | None = None,
     ) -> None:
-        super().__init__(
-            instructions=system_prompt,
-        )
+        ctx = context or AgentContext()
+        super().__init__(instructions=build_instructions(ctx))
+        self._context = ctx
         self._publisher = publisher
 
     async def on_enter(self):
-        """Called when the agent enters the session."""
-        # Phase 3 replaces this with a per-topic opening line read from the
-        # database, so the tutor opens *in* the topic the learner already
-        # picked instead of asking them to pick one again.
-        self.session.say(
-            "Hello! I'm your English practice partner. What would you like to talk about today?"
-        )
+        """Speak the topic's opening line as soon as the agent joins.
+
+        The learner already picked a topic on the previous screen, so the old
+        behaviour — a single hardcoded "What would you like to talk about
+        today?" for every session — made them choose twice.
+
+        session.say() speaks the database text verbatim rather than asking the
+        LLM to improvise a greeting, which is what makes "each topic has its
+        own opening line" mean something. add_to_chat_ctx keeps the model
+        aware of what it already said so it doesn't greet twice.
+        """
+        opening = self._context.opening_line
+
+        if opening:
+            if self._context.learner.display_name:
+                opening = opening.replace("{name}", self._context.learner.display_name)
+            self.session.say(opening, add_to_chat_ctx=True)
+        else:
+            self.session.generate_reply(
+                instructions=(
+                    "Greet the learner warmly in one or two sentences and open "
+                    "the conversation with a question."
+                )
+            )
 
 
 def prewarm(proc: JobProcess):
@@ -66,41 +83,55 @@ def prewarm(proc: JobProcess):
 async def entrypoint(ctx: JobContext):
     """Main agent entrypoint — called when a new room is created."""
 
-    # Extract session metadata from room metadata
+    # Connect first: no blocking work before the room is joined, so a slow
+    # dependency can never leave the learner in a room with no agent.
+    await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
+
     room_metadata = {}
     if ctx.room.metadata:
         try:
             room_metadata = json.loads(ctx.room.metadata)
         except json.JSONDecodeError:
-            pass
+            logger.warning("room metadata is not valid JSON", extra={"room": ctx.room.name})
 
-    topic_id = room_metadata.get("topic_id")
     session_id = room_metadata.get("session_id")
+    log_ctx = {
+        "session_id": session_id,
+        "user_id": room_metadata.get("user_id"),
+        "topic_id": room_metadata.get("topic_id"),
+    }
 
-    # Initialize topic context
-    rag = RAGContextProvider()
+    context_client = ContextClient()
+    ctx.add_shutdown_callback(context_client.aclose)
 
-    system_prompt = build_system_prompt(topic_id=topic_id, rag=rag)
+    agent_context = await context_client.fetch(session_id)
 
-    # Initialize transcript publisher
-    publisher = TranscriptPublisher(session_id) if session_id else None
-
-    # Connect to the room
-    await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
-
-    # Create the agent
-    agent = EnglishTutorAgent(
-        system_prompt=system_prompt,
-        publisher=publisher,
+    logger.info(
+        "session context loaded: topic=%s level=%s attempt=%s proficiency=%s",
+        (agent_context.topic or {}).get("title"),
+        (agent_context.level or {}).get("level"),
+        agent_context.learner.attempt_number,
+        agent_context.learner.proficiency_level,
+        extra=log_ctx,
     )
-    agent._topic_id = topic_id
 
-    # Create and start the session with the voice pipeline
+    publisher = TranscriptPublisher(session_id) if session_id else None
+    if publisher:
+        ctx.add_shutdown_callback(publisher.aclose)
+
+    agent = EnglishTutorAgent(context=agent_context, publisher=publisher)
+
     session = AgentSession(
         vad=ctx.proc.userdata["vad"],
         stt=deepgram.STT(
             model="nova-2",
             language="en",
+            # Explicit even though these match the plugin defaults: filler
+            # words are what make a later hesitation analysis real data, and
+            # smart_format would inject punctuation the LLM would then try to
+            # "correct" as a learner error.
+            filler_words=True,
+            smart_format=False,
         ),
         llm=google_plugins.LLM(
             model="gemini-2.5-flash",
@@ -110,35 +141,40 @@ async def entrypoint(ctx: JobContext):
             model="eleven_turbo_v2",
             voice_id="EXAVITQu4vr4xnSDxMaL",  # Sarah - premade, works on free tier
         ),
-        turn_handling=TurnHandlingOptions(
-            interruption=InterruptionOptions(mode="vad", enabled=True),
-        ),
+        turn_handling=build_turn_handling(agent_context),
     )
 
-    await session.start(
-        room=ctx.room,
-        agent=agent,
-    )
+    await session.start(room=ctx.room, agent=agent)
 
 
-def build_system_prompt(
-    topic_id: int | None,
-    rag: RAGContextProvider,
-) -> str:
-    """Build the LLM system prompt from the selected topic's context."""
+def build_turn_handling(context: AgentContext) -> TurnHandlingOptions:
+    """Turn-taking tuned for hesitant second-language speakers.
 
-    base_prompt = (
-        "You are an AI English speaking tutor. Your role is to help learners "
-        "practice spoken English in a natural, encouraging way. "
-        "Speak clearly and at a moderate pace. "
-        "Gently correct grammar and pronunciation errors. "
-        "Keep responses concise (2-3 sentences) to maintain conversation flow.\n\n"
-    )
+    The SDK default is fixed endpointing at 0.5s of silence, which is tuned
+    for native speakers and chronically cuts off learners who pause
+    mid-sentence to find a word.
+    """
+    tuning = context.turn_tuning
 
-    return (
-        base_prompt
-        + "Guide the conversation around the following topic. Keep it engaging and educational:\n\n"
-        + rag.get_topic_context(topic_id)
+    return TurnHandlingOptions(
+        endpointing={
+            # "dynamic" extends the wait when an utterance sounds unfinished
+            # — a trailing conjunction, rising intonation — which is exactly
+            # the "I went to the... um..." case.
+            "mode": "dynamic",
+            "min_delay": tuning.get("min_delay", 0.9),
+            "max_delay": tuning.get("max_delay", 6.0),
+        },
+        interruption={
+            "enabled": True,
+            # mode omitted on purpose so the SDK picks its adaptive ML
+            # classifier. Pinning "vad" meant a cough or an "umm" cut the
+            # tutor off mid-sentence.
+            "min_duration": 0.6,
+            "min_words": 2,
+            "resume_false_interruption": True,
+            "false_interruption_timeout": 3.0,
+        },
     )
 
 

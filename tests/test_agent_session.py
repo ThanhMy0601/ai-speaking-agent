@@ -1,69 +1,109 @@
-"""End-to-end smoke test for EnglishTutorAgent via the livekit-agents eval
-harness (AgentSession + a scripted FakeLLM — no network, no API keys).
+"""End-to-end agent tests via the livekit-agents eval harness.
 
-This proves the harness itself works against the CURRENT agent, so Phase 3
-(topic-aware greeting from DB) and Phase 4 (TTS-contract / honesty prompt
-assertions) can extend it with confidence instead of discovering the harness
-API from scratch.
+AgentSession + a scripted FakeLLM — no network, no API keys, no LiveKit room.
 """
 from livekit.agents.voice.agent_session import AgentSession
 
-from agent import EnglishTutorAgent
+from agent import EnglishTutorAgent, build_turn_handling
+from context_client import AgentContext
+
+from conftest import build_context
 
 
-async def test_greeting_is_spoken_on_enter(fake_llm):
-    agent = EnglishTutorAgent(system_prompt="You are a helpful tutor.", publisher=None)
-
-    session = AgentSession(llm=fake_llm)
-    await session.start(agent=agent)
-    await session.run(user_input="Hi there")
-
-    greetings = [
-        item.text_content
-        for item in session.history.items
-        if getattr(item, "role", None) == "assistant"
-    ]
-    assert (
-        "Hello! I'm your English practice partner. "
-        "What would you like to talk about today?"
-    ) in greetings
-
-
-async def test_current_greeting_ignores_topic_id(fake_llm):
-    """Characterization test for a known gap (see REBUILD_PLAN_V2.md §5).
-
-    on_enter() only branches on session_type, never on topic_id — so even
-    when the learner already picked a topic, the agent still asks them what
-    they want to talk about. Phase 3 replaces this with a DB-driven,
-    topic-aware opening line; when that lands, this test's assertion flips
-    and should be updated deliberately, not treated as a regression.
-    """
-    agent = EnglishTutorAgent(system_prompt="You are a helpful tutor.", publisher=None)
-    agent._topic_id = 3  # learner already chose "Travel & Tourism"
-
-    session = AgentSession(llm=fake_llm)
-    await session.start(agent=agent)
-    await session.run(user_input="Hi there")
-
-    greetings = " ".join(
+def assistant_turns(session) -> str:
+    return " ".join(
         item.text_content or ""
         for item in session.history.items
         if getattr(item, "role", None) == "assistant"
     )
-    assert "what would you like to talk about" in greetings.lower()
 
 
-async def test_llm_reply_after_greeting_is_captured_in_run_result(fake_llm):
-    """result.events from session.run() only contains events produced
-    during that run (the assistant's reply) — the user's own input isn't
-    re-emitted as an event, it's the run's input."""
-    agent = EnglishTutorAgent(system_prompt="You are a helpful tutor.", publisher=None)
+async def test_greeting_opens_in_the_chosen_topic(fake_llm, topic_context):
+    """The behaviour this whole phase exists to fix.
+
+    Previously on_enter() spoke one hardcoded line for every session —
+    "What would you like to talk about today?" — even though the learner had
+    just chosen a topic on the previous screen.
+    """
+    agent = EnglishTutorAgent(context=topic_context)
 
     session = AgentSession(llm=fake_llm)
     await session.start(agent=agent)
-    result = await session.run(user_input="Let's talk about travel")
+    await session.run(user_input="Hi")
 
-    assistant_msg = result.expect.next_event(type="message")
-    assert assistant_msg.event().item.role == "assistant"
-    assert assistant_msg.event().item.text_content == fake_llm._reply
-    result.expect.no_more_events()
+    spoken = assistant_turns(session)
+    assert topic_context.topic["opening_line"] in spoken
+    assert "what would you like to talk about" not in spoken.lower()
+
+
+async def test_greeting_uses_the_level_opening_line_on_a_repeat_attempt(fake_llm):
+    """Attempt 3 gets level 3's opening line, not the topic's."""
+    ctx = build_context(
+        attempt_number=3,
+        level={
+            "id": 9,
+            "level": 3,
+            "title": "Interviews and career goals",
+            "conversation_guide": "Ask the harder interview questions.",
+            "opening_line": "Welcome back. Where do you want your career to be in a few years?",
+            "target_vocabulary": [],
+            "target_grammar": [],
+        },
+    )
+    agent = EnglishTutorAgent(context=ctx)
+
+    session = AgentSession(llm=fake_llm)
+    await session.start(agent=agent)
+    await session.run(user_input="Hi")
+
+    spoken = assistant_turns(session)
+    assert "Where do you want your career to be" in spoken
+    assert ctx.topic["opening_line"] not in spoken
+
+
+async def test_greeting_substitutes_the_learner_name(fake_llm):
+    ctx = build_context(
+        opening_line="Hi {name}! Ready to talk about work?",
+        display_name="Mai",
+    )
+    agent = EnglishTutorAgent(context=ctx)
+
+    session = AgentSession(llm=fake_llm)
+    await session.start(agent=agent)
+    await session.run(user_input="Hi")
+
+    assert "Hi Mai! Ready to talk about work?" in assistant_turns(session)
+
+
+async def test_agent_without_context_still_starts(fake_llm):
+    """Rails being unreachable degrades to a generic conversation rather
+    than leaving the learner in a silent room."""
+    agent = EnglishTutorAgent(context=AgentContext())
+
+    session = AgentSession(llm=fake_llm)
+    await session.start(agent=agent)
+    result = await session.run(user_input="Hello?")
+
+    reply = result.expect.next_event(type="message")
+    assert reply.event().item.role == "assistant"
+
+
+def test_endpointing_waits_longer_for_beginners():
+    """The SDK default is a fixed 0.5s, tuned for native speakers. Learners
+    pause mid-sentence to search for words and get cut off."""
+    beginner = build_turn_handling(build_context(proficiency_level="beginner"))
+    advanced = build_turn_handling(build_context(proficiency_level="advanced"))
+
+    assert beginner["endpointing"]["mode"] == "dynamic"
+    assert beginner["endpointing"]["min_delay"] > 0.5
+    assert beginner["endpointing"]["min_delay"] > advanced["endpointing"]["min_delay"]
+
+
+def test_interruption_ignores_a_single_filler_word():
+    opts = build_turn_handling(build_context())
+
+    assert opts["interruption"]["min_words"] >= 2
+    assert opts["interruption"]["resume_false_interruption"] is True
+    # mode is deliberately unset so the SDK picks its adaptive ML classifier;
+    # pinning "vad" let a cough interrupt the tutor.
+    assert "mode" not in opts["interruption"]

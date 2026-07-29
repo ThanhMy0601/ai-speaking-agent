@@ -1,39 +1,94 @@
-"""Unit tests for the pure prompt-building function in agent.py.
+"""Tests for system-prompt construction.
 
-These don't need AgentSession/AudioStream/DB — build_system_prompt is a
-plain function that takes a duck-typed context provider.
+These are pure functions over an AgentContext, so they need no DB, no HTTP
+and no LLM.
 """
-from agent import build_system_prompt
+from context_client import AgentContext
+from prompts import build_instructions
+
+from conftest import build_context
 
 
-def test_prompt_includes_topic_context(fake_rag):
-    prompt = build_system_prompt(topic_id=42, rag=fake_rag)
+def test_prompt_includes_topic_content_from_the_database(topic_context):
+    prompt = build_instructions(topic_context)
 
-    assert "[fake topic context for topic 42]" in prompt
-    assert "Guide the conversation around the following topic" in prompt
-
-
-def test_prompt_keeps_the_tutor_base_instructions(fake_rag):
-    prompt = build_system_prompt(topic_id=1, rag=fake_rag)
-
-    assert "AI English speaking tutor" in prompt
-    assert "2-3 sentences" in prompt
+    assert "Work & Career" in prompt
+    assert "Focus on professional English" in prompt
+    assert "take on" in prompt
+    assert "Present perfect for experience" in prompt
 
 
-def test_prompt_without_topic_still_builds(fake_rag):
-    """topic_id is None for a session created without one — the provider
-    returns generic context rather than the prompt blowing up."""
-    prompt = build_system_prompt(topic_id=None, rag=fake_rag)
+def test_prompt_tells_the_model_not_to_ask_for_a_topic(topic_context):
+    """The learner already picked a topic on the previous screen."""
+    prompt = build_instructions(topic_context)
 
-    assert "[fake topic context for topic None]" in prompt
+    assert "never ask them what they would like to talk about" in prompt.lower()
 
 
-def test_prompt_has_no_ielts_or_roleplay_traces(fake_rag):
-    """IELTS mock test and role-play were removed from the product in
-    Phase 2. Nothing in the prompt path should reference them."""
-    prompt = build_system_prompt(topic_id=1, rag=fake_rag).lower()
+def test_prompt_never_claims_to_hear_pronunciation(topic_context):
+    """The model only ever sees an ASR transcript. Instructing it to correct
+    pronunciation made it confabulate feedback it could not possibly have."""
+    prompt = build_instructions(topic_context)
 
-    assert "ielts" not in prompt
-    assert "examiner" not in prompt
-    assert "role-play" not in prompt
-    assert "in character" not in prompt
+    assert "You do not hear audio" in prompt
+    assert "cannot assess pronunciation" in prompt
+
+
+def test_prompt_forbids_markdown_because_output_is_spoken(topic_context):
+    prompt = build_instructions(topic_context)
+
+    assert "spoken aloud" in prompt
+    assert "No markdown" in prompt
+
+
+def test_prompt_adapts_to_beginner_level():
+    prompt = build_instructions(build_context(proficiency_level="beginner"))
+
+    assert "beginner" in prompt
+    assert "ten words" in prompt
+
+
+def test_prompt_adapts_to_advanced_level():
+    prompt = build_instructions(build_context(proficiency_level="advanced"))
+
+    assert "advanced" in prompt
+    assert "idiom and collocation" in prompt
+
+
+def test_prompt_falls_back_to_intermediate_for_unknown_level():
+    prompt = build_instructions(build_context(proficiency_level=None))
+
+    assert "eighteen words" in prompt
+
+
+def test_repeat_attempts_tell_the_model_not_to_re_explain_basics():
+    prompt = build_instructions(build_context(attempt_number=3))
+
+    assert "session number 3" in prompt
+    assert "don't re-explain the basics" in prompt
+
+
+def test_level_content_overrides_topic_content():
+    ctx = build_context(
+        level={
+            "id": 9,
+            "level": 3,
+            "title": "Interviews and career goals",
+            "conversation_guide": "Ask the harder interview questions.",
+            "opening_line": "Where do you want your career to be in a few years?",
+            "target_vocabulary": ["career path"],
+            "target_grammar": ["Future forms for goals"],
+        }
+    )
+    prompt = build_instructions(ctx)
+
+    assert "Level 3: Interviews and career goals" in prompt
+    assert "Ask the harder interview questions." in prompt
+    assert "Focus on professional English" not in prompt
+
+
+def test_prompt_without_a_topic_still_builds():
+    prompt = build_instructions(AgentContext())
+
+    assert "No specific topic was selected" in prompt
+    assert "You do not hear audio" in prompt

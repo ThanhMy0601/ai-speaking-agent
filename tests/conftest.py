@@ -10,6 +10,8 @@ from livekit.agents import llm as lk_llm
 from livekit.agents.llm.llm import LLM, LLMStream
 from livekit.agents.types import APIConnectOptions
 
+from context_client import AgentContext, Learner
+
 
 class FakeLLMStream(LLMStream):
     def __init__(self, llm_instance, *, chat_ctx, tools, conn_options, reply):
@@ -51,17 +53,50 @@ def fake_llm():
     return FakeLLM()
 
 
-class FakeRag:
-    """Duck-typed stand-in for RAGContextProvider — no DB connection.
+# Mirrors AgentContextBuilder::TURN_TUNING in Rails. Rails computes the
+# tuning and sends it down; the agent only applies it.
+RAILS_TURN_TUNING = {
+    "beginner": {"min_delay": 1.2, "max_delay": 8.0},
+    "intermediate": {"min_delay": 0.9, "max_delay": 6.0},
+    "advanced": {"min_delay": 0.6, "max_delay": 4.0},
+}
 
-    build_system_prompt() only calls get_topic_context, so tests don't need
-    a real Postgres connection to exercise prompt-building logic.
-    """
 
-    def get_topic_context(self, topic_id) -> str:
-        return f"[fake topic context for topic {topic_id}]"
+def build_context(
+    *,
+    topic_title="Work & Career",
+    opening_line="Hello! Let's talk about work today. What do you do day to day?",
+    conversation_guide="Focus on professional English and workplace stories.",
+    proficiency_level="intermediate",
+    attempt_number=1,
+    level=None,
+    display_name="Test Learner",
+):
+    """Builds the context Rails would return, without touching HTTP or a DB."""
+    return AgentContext(
+        learner=Learner(
+            display_name=display_name,
+            proficiency_level=proficiency_level,
+            learning_goal="business_english",
+            attempt_number=attempt_number,
+        ),
+        topic={
+            "id": 2,
+            "title": topic_title,
+            "description": "Excel in job interviews and workplace communication",
+            "conversation_guide": conversation_guide,
+            "opening_line": opening_line,
+            "target_vocabulary": ["take on", "deadline", "stakeholder"],
+            "target_grammar": ["Present perfect for experience"],
+            "cefr_level": "b1",
+        },
+        level=level,
+        turn_tuning=dict(
+            RAILS_TURN_TUNING.get(proficiency_level, RAILS_TURN_TUNING["intermediate"])
+        ),
+    )
 
 
 @pytest.fixture
-def fake_rag():
-    return FakeRag()
+def topic_context():
+    return build_context()
