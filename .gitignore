@@ -21,3 +21,6 @@ build/
 # IDE
 .DS_Store
 *.swp
+
+# Test caches
+.pytest_cache/
