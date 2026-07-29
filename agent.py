@@ -8,6 +8,7 @@ ContextClient; nothing about what to teach lives in this repo.
 
 import json
 import logging
+import time
 
 from dotenv import load_dotenv
 
@@ -145,6 +146,58 @@ async def entrypoint(ctx: JobContext):
     )
 
     await session.start(room=ctx.room, agent=agent)
+
+    if publisher:
+        wire_transcript_persistence(session, publisher)
+
+
+def wire_transcript_persistence(session: AgentSession, publisher: TranscriptPublisher) -> None:
+    """Persist the conversation as it happens.
+
+    conversation_item_added is the transcript source of truth: it fires for
+    BOTH speakers with final text, in order. (user_input_transcribed fires
+    per interim chunk and would persist half-sentences.)
+
+    user_state_changed supplies the wall-clock speech timestamps.
+    ChatMessage.created_at alone is the moment the item was added — after
+    endpointing, i.e. 0.9-6s late — useless for slicing audio at these
+    times in Phase 5. The agent sends ABSOLUTE epoch-ms; it cannot know
+    "ms from recording start" because egress starts in another process at
+    an unknown moment, so Rails computes offsets from egress T0 later.
+    """
+    speech_window: dict[str, int] = {}
+
+    @session.on("user_state_changed")
+    def _on_user_state(ev) -> None:
+        now_ms = int(time.time() * 1000)
+        if ev.new_state == "speaking":
+            speech_window["started_at"] = now_ms
+        elif ev.old_state == "speaking":
+            speech_window["ended_at"] = now_ms
+
+    @session.on("conversation_item_added")
+    def _on_item(ev) -> None:
+        item = ev.item
+        text = item.text_content
+        if item.type != "message" or not text:
+            return
+
+        if item.role == "user":
+            started = speech_window.pop("started_at", None)
+            ended = speech_window.pop("ended_at", None)
+        else:
+            started = int(item.created_at * 1000)
+            ended = None
+
+        publisher.enqueue(
+            external_id=item.id,
+            speaker="learner" if item.role == "user" else "ai",
+            text=text,
+            spoke_started_at_ms=started,
+            spoke_ended_at_ms=ended,
+            interrupted=bool(item.interrupted),
+            stt_confidence=item.transcript_confidence,
+        )
 
 
 def build_turn_handling(context: AgentContext) -> TurnHandlingOptions:
